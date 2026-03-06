@@ -1,0 +1,15 @@
+orig
+*.bz2
+node_modules
+.DS_Store
+originals/*.flac
+/wavs
+
+# Large audio/binary directories - download from GitHub releases instead
+old dataset/wavs/
+old dataset/split-flac/
+training/dataset/
+training/output/
+training/output_female_only/
+*.tar.gz
+*.pth
