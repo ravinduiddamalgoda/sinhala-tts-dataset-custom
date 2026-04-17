@@ -13,6 +13,36 @@ import numpy as np
 import soundfile as sf
 from pathlib import Path
 
+try:
+    import pyloudnorm as pyln
+    from scipy.signal import butter, sosfilt
+    HAS_POSTPROCESS = True
+except ImportError:
+    HAS_POSTPROCESS = False
+
+
+def post_process(wav_array, sr):
+    """Apply post-processing to improve synthesized audio quality."""
+    if not HAS_POSTPROCESS:
+        return wav_array
+
+    wav = np.array(wav_array, dtype=np.float32)
+
+    # Highpass filter at 80Hz to remove low-frequency rumble
+    sos = butter(5, 80, btype="high", fs=sr, output="sos")
+    wav = sosfilt(sos, wav).astype(np.float32)
+
+    # Loudness normalization to -20 LUFS
+    meter = pyln.Meter(sr)
+    loudness = meter.integrated_loudness(wav)
+    if loudness > -70:  # avoid normalizing silence
+        wav = pyln.normalize.loudness(wav, loudness, -20.0)
+
+    # Clip to prevent clipping
+    wav = np.clip(wav, -1.0, 1.0)
+
+    return wav
+
 
 def synthesize_coqui(model_path, config_path, text, output_path, speaker=None):
     """Synthesize using Coqui TTS API"""
@@ -34,7 +64,7 @@ def synthesize_coqui(model_path, config_path, text, output_path, speaker=None):
     print(f"Saved: {output_path}")
 
 
-def synthesize_direct(model_path, config_path, text, output_path, speaker=None):
+def synthesize_direct(model_path, config_path, text, output_path, speaker=None, apply_postprocess=True):
     """Synthesize by directly loading the model (more control)"""
     from TTS.tts.configs.vits_config import VitsConfig
     from TTS.tts.models.vits import Vits
@@ -47,11 +77,16 @@ def synthesize_direct(model_path, config_path, text, output_path, speaker=None):
     )
 
     wav = synthesizer.tts(text=text, speaker_name=speaker)
+    sr = synthesizer.tts_config.audio.sample_rate
+
+    wav_array = np.array(wav)
+    if apply_postprocess:
+        wav_array = post_process(wav_array, sr)
 
     # Save
-    sf.write(output_path, np.array(wav), synthesizer.tts_config.audio.sample_rate)
+    sf.write(output_path, wav_array, sr)
     print(f"Saved: {output_path}")
-    return wav
+    return wav_array
 
 
 def find_best_model(output_dir):
@@ -90,6 +125,8 @@ def main():
     parser.add_argument("--speaker", type=str, default="oshadi", help="Speaker name (for multi-speaker)")
     parser.add_argument("--model-dir", type=str, default=None,
                         help="Auto-find best model in this directory")
+    parser.add_argument("--no-postprocess", action="store_true",
+                        help="Disable audio post-processing (highpass + loudness normalization)")
 
     args = parser.parse_args()
 
@@ -102,6 +139,7 @@ def main():
         training_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)))
         search_dirs = [
             args.model_dir,
+            os.path.join(training_dir, "output_female_only_clean"),
             os.path.join(training_dir, "output"),
             os.path.join(training_dir, "output_female_only"),
         ]
@@ -122,7 +160,8 @@ def main():
     print(f"Speaker: {args.speaker}")
     print()
 
-    synthesize_direct(model_path, config_path, args.text, args.output, args.speaker)
+    synthesize_direct(model_path, config_path, args.text, args.output, args.speaker,
+                      apply_postprocess=not args.no_postprocess)
     print("\nDone!")
 
 
@@ -138,10 +177,12 @@ def batch_synthesize(model_path, config_path, texts, output_dir, speaker="oshadi
         use_cuda=torch.cuda.is_available(),
     )
 
+    sr = synthesizer.tts_config.audio.sample_rate
     for i, text in enumerate(texts):
         wav = synthesizer.tts(text=text, speaker_name=speaker)
+        wav_array = post_process(np.array(wav), sr)
         out_path = os.path.join(output_dir, f"sample_{i+1:03d}.wav")
-        sf.write(out_path, np.array(wav), synthesizer.tts_config.audio.sample_rate)
+        sf.write(out_path, wav_array, sr)
         print(f"[{i+1}/{len(texts)}] {out_path}")
 
     print(f"\nAll {len(texts)} samples saved to {output_dir}")

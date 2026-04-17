@@ -3,10 +3,12 @@ Sinhala TTS Dataset Preparation Script
 =======================================
 Prepares the dataset for VITS multi-speaker training via Coqui TTS.
 Creates separate metadata files for multi-speaker and female-only training.
+Includes text cleaning and quality filtering.
 """
 
 import os
 import csv
+import re
 import random
 import shutil
 from pathlib import Path
@@ -14,18 +16,39 @@ from pathlib import Path
 # ---------- Configuration ----------
 DATASET_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 METADATA_FILE = os.path.join(DATASET_ROOT, "metadata.csv")
+METADATA_CLEAN_FILE = os.path.join(DATASET_ROOT, "metadata_clean.csv")
 WAVS_DIR = os.path.join(DATASET_ROOT, "wavs")
+WAVS_PROCESSED_DIR = os.path.join(DATASET_ROOT, "wavs_processed")
 
 OUTPUT_DIR = os.path.join(DATASET_ROOT, "training", "dataset")
 MULTISPEAKER_DIR = os.path.join(OUTPUT_DIR, "multispeaker")
 FEMALE_ONLY_DIR = os.path.join(OUTPUT_DIR, "female_only")
+FEMALE_ONLY_CLEAN_DIR = os.path.join(OUTPUT_DIR, "female_only_clean")
 
 VAL_SPLIT = 0.05  # 5% validation
+VAL_SPLIT_CLEAN = 0.10  # 10% for small cleaned dataset
 
 
-def parse_metadata(metadata_path):
-    """Parse the pipe-separated metadata.csv"""
+def clean_text(text):
+    """Normalize romanized Sinhala text for consistent training input."""
+    # Normalize all quote styles to straight single quote
+    text = re.sub(r"[\"\"\"'''\u2018\u2019\u201C\u201D]", "'", text)
+    # Normalize dashes to single hyphen
+    text = re.sub(r"[\u2013\u2014\u2015]+", "-", text)
+    # Collapse multiple spaces
+    text = re.sub(r"\s+", " ", text)
+    # Strip leading/trailing whitespace
+    text = text.strip()
+    return text
+
+
+def parse_metadata(metadata_path, filter_quality=False):
+    """Parse the pipe-separated metadata.csv with optional quality filtering."""
     entries = []
+    seen_texts = set()
+    skipped_short = 0
+    skipped_dup = 0
+
     with open(metadata_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -38,12 +61,31 @@ def parse_metadata(metadata_path):
             roman = parts[1]          # romanized text
             sinhala = parts[2]        # sinhala text
             speaker = parts[3]        # mettananda or oshadi
+
+            # Clean text
+            roman = clean_text(roman)
+
+            if filter_quality:
+                # Skip very short texts
+                if len(roman) < 10:
+                    skipped_short += 1
+                    continue
+                # Skip duplicate texts (keep first occurrence)
+                if roman in seen_texts:
+                    skipped_dup += 1
+                    continue
+                seen_texts.add(roman)
+
             entries.append({
                 "wav_id": wav_id,
                 "roman": roman,
                 "sinhala": sinhala,
                 "speaker": speaker
             })
+
+    if filter_quality and (skipped_short > 0 or skipped_dup > 0):
+        print(f"  Quality filter: skipped {skipped_short} short texts, {skipped_dup} duplicates")
+
     return entries
 
 
@@ -62,11 +104,14 @@ def verify_audio_files(entries, wavs_dir):
     return valid
 
 
-def create_dataset_split(entries, output_dir, wavs_dir, use_sinhala=False):
+def create_dataset_split(entries, output_dir, wavs_dir, use_sinhala=False, val_split=None):
     """
     Create train/val metadata files in LJSpeech format for Coqui TTS.
     For multi-speaker: wav_id|text|text|speaker_name
     """
+    if val_split is None:
+        val_split = VAL_SPLIT
+
     os.makedirs(output_dir, exist_ok=True)
 
     # Create symlink to wavs directory
@@ -83,7 +128,7 @@ def create_dataset_split(entries, output_dir, wavs_dir, use_sinhala=False):
     shuffled = entries.copy()
     random.shuffle(shuffled)
 
-    val_count = max(1, int(len(shuffled) * VAL_SPLIT))
+    val_count = max(1, int(len(shuffled) * val_split))
     val_entries = shuffled[:val_count]
     train_entries = shuffled[val_count:]
 
@@ -146,6 +191,27 @@ def main():
     print(f"  Female entries: {len(female_entries)}")
     create_dataset_split(female_entries, FEMALE_ONLY_DIR, WAVS_DIR, use_sinhala=False)
 
+    # --- Female-only CLEAN dataset (preprocessed audio + quality filtered) ---
+    if os.path.exists(METADATA_CLEAN_FILE) and os.path.isdir(WAVS_PROCESSED_DIR):
+        print(f"\n--- Female-Only CLEAN Dataset (preprocessed audio) ---")
+        clean_entries = parse_metadata(METADATA_CLEAN_FILE, filter_quality=True)
+        female_clean = [e for e in clean_entries if e["speaker"] == "oshadi"]
+        print(f"Output: {FEMALE_ONLY_CLEAN_DIR}")
+        print(f"  Clean female entries: {len(female_clean)}")
+
+        # Verify processed audio files exist
+        female_clean = verify_audio_files(female_clean, WAVS_PROCESSED_DIR)
+        create_dataset_split(
+            female_clean, FEMALE_ONLY_CLEAN_DIR, WAVS_PROCESSED_DIR,
+            use_sinhala=False, val_split=VAL_SPLIT_CLEAN,
+        )
+    else:
+        print(f"\n--- Skipping CLEAN dataset (run preprocess_audio.py first) ---")
+        if not os.path.exists(METADATA_CLEAN_FILE):
+            print(f"  Missing: {METADATA_CLEAN_FILE}")
+        if not os.path.isdir(WAVS_PROCESSED_DIR):
+            print(f"  Missing: {WAVS_PROCESSED_DIR}")
+
     # --- Also create Sinhala script versions ---
     print(f"\n--- Multi-Speaker Dataset (Sinhala script) ---")
     sinhala_dir = os.path.join(OUTPUT_DIR, "multispeaker_sinhala")
@@ -158,8 +224,13 @@ def main():
     print("\n" + "=" * 60)
     print("  Dataset preparation complete!")
     print("=" * 60)
-    print(f"\nRecommended: Use multi-speaker dataset for training:")
-    print(f"  {MULTISPEAKER_DIR}")
+    if os.path.isdir(FEMALE_ONLY_CLEAN_DIR):
+        print(f"\nRecommended: Use cleaned female-only dataset for training:")
+        print(f"  {FEMALE_ONLY_CLEAN_DIR}")
+    else:
+        print(f"\nRecommended: Use multi-speaker dataset for training:")
+        print(f"  {MULTISPEAKER_DIR}")
+        print(f"\nFor better quality, run preprocess_audio.py first, then re-run this script.")
     print(f"\nThen synthesize with speaker='oshadi' for female voice")
 
 

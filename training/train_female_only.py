@@ -11,13 +11,13 @@ import sys
 
 DATASET_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRAINING_DIR = os.path.join(DATASET_ROOT, "training")
-DATASET_PATH = os.path.join(TRAINING_DIR, "dataset", "female_only")
-OUTPUT_PATH = os.path.join(TRAINING_DIR, "output_female_only")
+DATASET_PATH = os.path.join(TRAINING_DIR, "dataset", "female_only_clean")
+OUTPUT_PATH = os.path.join(TRAINING_DIR, "output_female_only_clean")
 
-BATCH_SIZE = 24          # Smaller because less data
+BATCH_SIZE = 16          # Smaller batch = more gradient updates per epoch with small data
 EVAL_BATCH_SIZE = 8
-NUM_EPOCHS = 2000        # More epochs needed for small dataset
-LEARNING_RATE = 0.0002
+NUM_EPOCHS = 3000        # More epochs needed for small dataset
+LEARNING_RATE = 0.0001   # Lower LR prevents overshooting with limited data
 SAMPLE_RATE = 22050
 NUM_WORKERS = 4
 
@@ -45,7 +45,7 @@ def main():
         hop_length=256,
         num_mels=80,
         mel_fmin=0,
-        mel_fmax=None,
+        mel_fmax=8000,  # Limit to speech-relevant frequencies (was None/11025Hz)
     )
 
     character_config = CharactersConfig(
@@ -60,7 +60,7 @@ def main():
 
     config = VitsConfig(
         output_path=OUTPUT_PATH,
-        run_name="sinhala-vits-female",
+        run_name="sinhala-vits-female-clean",
 
         audio=audio_config,
 
@@ -71,6 +71,7 @@ def main():
         characters=character_config,
         text_cleaner=None,
         use_phonemes=False,
+        add_blank=True,  # Insert blank tokens between chars for better alignment
 
         batch_size=BATCH_SIZE,
         eval_batch_size=EVAL_BATCH_SIZE,
@@ -81,17 +82,17 @@ def main():
         lr_gen=LEARNING_RATE,
         lr_disc=LEARNING_RATE,
         lr_scheduler_gen="ExponentialLR",
-        lr_scheduler_gen_params={"gamma": 0.999875, "last_epoch": -1},
+        lr_scheduler_gen_params={"gamma": 0.99995, "last_epoch": -1},
         lr_scheduler_disc="ExponentialLR",
-        lr_scheduler_disc_params={"gamma": 0.999875, "last_epoch": -1},
+        lr_scheduler_disc_params={"gamma": 0.99995, "last_epoch": -1},
 
         print_step=25,
         plot_step=100,
         print_eval=True,
-        mixed_precision=True,
-        save_step=2000,
-        save_n_checkpoints=3,
-        save_best_after=5000,
+        mixed_precision=False,  # FP32 for stability with small dataset
+        save_step=1000,
+        save_n_checkpoints=5,
+        save_best_after=3000,
 
         run_eval=True,
         test_delay_epochs=3,
